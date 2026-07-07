@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Kochbuch">
+<meta name="theme-color" content="#F2F5EF">
+<title>Mein Kochbuch</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>&#127859;</text></svg>">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>html,body{margin:0;padding:0;background:#F2F5EF}</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+window.storage = {
+  async get(key){ const v = localStorage.getItem("kv:"+key); if(v===null) throw new Error("not found"); return {key, value:v, shared:false}; },
+  async set(key, value){ localStorage.setItem("kv:"+key, value); return {key, value, shared:false}; },
+  async delete(key){ localStorage.removeItem("kv:"+key); return {key, deleted:true, shared:false}; },
+  async list(prefix){ prefix=prefix||""; const keys=[]; for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(k && k.indexOf("kv:"+prefix)===0) keys.push(k.slice(3));} return {keys, prefix, shared:false}; }
+};
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ---------- Design-Token ----------
+const C = {
+  bg: "#F2F5EF",        // Salbei-Papier
+  card: "#FFFFFF",
+  ink: "#1F3326",       // Tannen-Tinte
+  soft: "#5C7263",      // gedämpftes Grün
+  line: "#DDE5DA",
+  paprika: "#C4432B",   // Akzent, sparsam
+  senf: "#D9A441",      // Hashtags
+  senfBg: "#FBF3E2",
+};
+
+const KATEGORIEN = [
+  { id: "vorspeise",   name: "Vorspeise",   farbe: "#7A9E7E" },
+  { id: "hauptgericht",name: "Hauptgericht",farbe: "#C4432B" },
+  { id: "beilage",     name: "Beilage",     farbe: "#8C9E5E" },
+  { id: "fruehstueck", name: "Frühstück",   farbe: "#D98E5F" },
+  { id: "dessert",     name: "Dessert",     farbe: "#C97BA0" },
+  { id: "backen",      name: "Backen",      farbe: "#B07D4F" },
+  { id: "snack",       name: "Snack",       farbe: "#D9A441" },
+  { id: "getraenk",    name: "Getränk",     farbe: "#5E8CA8" },
+];
+const katName = (id) => KATEGORIEN.find((k) => k.id === id)?.name || "Sonstiges";
+const katFarbe = (id) => KATEGORIEN.find((k) => k.id === id)?.farbe || C.soft;
+
+const STORAGE_KEY = "kochbuch:rezepte";
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+// Hashtags aus Freitext ziehen (#pasta #schnell …)
+const extractTags = (text) =>
+  [...new Set((text.match(/#[\p{L}\p{N}_äöüß-]+/giu) || []).map((t) => t.slice(1).toLowerCase()))];
+
+// Kategorie automatisch aus Titel/Tags erkennen (DE + EN Stichwörter)
+const KAT_ERKENNUNG = [
+  ["getraenk",    /cocktail|margarita|spritz|negroni|martini|paloma|mocktail|smoothie(?!\s*bowl)|latte|matcha|tequila|mezcal|vodka|whiskey|gin\b|rum\b|sangria|punch\b|lemonade|drink|getränk/i],
+  ["fruehstueck", /breakfast|overnight oats|oats\b|oatmeal|granola|pancake|waffle|french toast|smoothie bowl|porridge|shakshuka|frühstück|müsli/i],
+  ["dessert",     /dessert|cookie|brownie|cheesecake|tiramisu|ice cream|gelato|pudding|mousse|crumble|donut|muffin|cupcake|churro|sorbet|nachtisch|kuchen/i],
+  ["backen",      /sourdough|focaccia|bagel|croissant|bread\b|brioche|baguette|dough\b|pastry|banana bread|scone|brot\b|teig/i],
+  ["vorspeise",   /appetizer|starter|antipast|bruschetta|crostini|carpaccio|crudo|ceviche|tartare|dip\b|hummus|soup|suppe|salad|salat|vorspeise/i],
+  ["snack",       /snack|bites\b|popcorn|energy ball|nachos|chips\b/i],
+  ["beilage",     /side dish|slaw\b|mashed potato|fries\b|coleslaw|garlic bread|beilage/i],
+];
+const kategorieErkennen = (text) => {
+  for (const [kat, rx] of KAT_ERKENNUNG) if (rx.test(text)) return kat;
+  return "hauptgericht";
+};
+
+// Bild verkleinern -> kompaktes JPEG-Base64
+function compressImage(file, maxDim = 700, quality = 0.65) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------- Haupt-App ----------
+function Kochbuch() {
+  const [rezepte, setRezepte] = useState([]);
+  const [geladen, setGeladen] = useState(false);
+  const [ansicht, setAnsicht] = useState("grid"); // grid | detail | form | import
+  const [aktiv, setAktiv] = useState(null);
+  const [suche, setSuche] = useState("");
+  const [tagFilter, setTagFilter] = useState([]);
+  const [katFilter, setKatFilter] = useState("alle");
+  const [meldung, setMeldung] = useState("");
+  const [speicherOk, setSpeicherOk] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      // Selbsttest: kann dieser Browser überhaupt dauerhaft speichern?
+      try {
+        await window.storage.set("kochbuch:probe", "1");
+        await window.storage.delete("kochbuch:probe");
+      } catch {
+        setSpeicherOk(false);
+      }
+      try {
+        const res = await window.storage.get(STORAGE_KEY);
+        if (res?.value) setRezepte(JSON.parse(res.value));
+      } catch {
+        // noch nichts gespeichert
+      }
+      setGeladen(true);
+    })();
+  }, []);
+
+  const speichern = async (neu) => {
+    setRezepte(neu);
+    try {
+      await window.storage.set(STORAGE_KEY, JSON.stringify(neu));
+      // Gegenprobe: wirklich angekommen?
+      const check = await window.storage.get(STORAGE_KEY);
+      if (!check?.value) throw new Error("leer");
+    } catch {
+      setSpeicherOk(false);
+    }
+  };
+
+  const upsert = async (rezept) => {
+    const idx = rezepte.findIndex((r) => r.id === rezept.id);
+    const neu = idx >= 0 ? rezepte.map((r) => (r.id === rezept.id ? rezept : r)) : [rezept, ...rezepte];
+    await speichern(neu);
+    setAktiv(rezept);
+    setAnsicht("detail");
+  };
+
+  const loeschen = async (id) => {
+    await speichern(rezepte.filter((r) => r.id !== id));
+    setAnsicht("grid");
+    setAktiv(null);
+  };
+
+  // Alle Tags mit Häufigkeit
+  const alleTags = {};
+  rezepte.forEach((r) => (r.hashtags || []).forEach((t) => (alleTags[t] = (alleTags[t] || 0) + 1)));
+
+  const gefiltert = rezepte.filter((r) => {
+    if (katFilter !== "alle" && r.kategorie !== katFilter) return false;
+    if (tagFilter.length && !tagFilter.every((t) => (r.hashtags || []).includes(t))) return false;
+    if (suche.trim()) {
+      const q = suche.trim().toLowerCase().replace(/^#/, "");
+      const heu =
+        r.titel + " " + (r.hashtags || []).join(" ") + " " + (r.zutaten || []).join(" ");
+      if (!heu.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  const toggleTag = (t) =>
+    setTagFilter((f) => (f.includes(t) ? f.filter((x) => x !== t) : [...f, t]));
+
+  const exportieren = () => {
+    const blob = new Blob([JSON.stringify(rezepte)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "mein-kochbuch.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.ink, fontFamily: "'Avenir Next','Segoe UI',system-ui,sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&display=swap');
+        .display { font-family:'Fraunces', Georgia, serif; }
+        .karte { transition: transform .15s ease, box-shadow .15s ease; }
+        .karte:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(31,51,38,.12); }
+        button { cursor:pointer }
+        input, textarea, select { outline:none }
+        input:focus, textarea:focus, select:focus { border-color:${C.soft} !important }
+      `}</style>
+
+      {/* Kopfzeile */}
+      <header style={{ borderBottom: `1px solid ${C.line}`, background: C.card }}>
+        <div style={{ maxWidth: 1060, margin: "0 auto", padding: "18px 20px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <h1 className="display" style={{ fontSize: 26, fontWeight: 700, margin: 0, cursor: "pointer" }} onClick={() => { setAnsicht("grid"); setAktiv(null); }}>
+            Mein Kochbuch
+          </h1>
+          <span style={{ fontSize: 13, color: C.soft }}>{rezepte.length} {rezepte.length === 1 ? "Rezept" : "Rezepte"} · v3</span>
+          <div style={{ flex: 1 }} />
+          {rezepte.length > 0 && (
+            <button onClick={exportieren} title="Alle Rezepte als JSON-Datei sichern"
+              style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, fontWeight: 600 }}>
+              ⬇ Sichern
+            </button>
+          )}
+          <button onClick={() => setAnsicht("import")}
+            style={{ border: `1.5px solid ${C.ink}`, background: "transparent", color: C.ink, borderRadius: 999, padding: "8px 16px", fontSize: 14, fontWeight: 600 }}>
+            ⤓ Aus Instagram importieren
+          </button>
+          <button onClick={() => { setAktiv(null); setAnsicht("form"); }}
+            style={{ border: "none", background: C.paprika, color: "#fff", borderRadius: 999, padding: "9px 18px", fontSize: 14, fontWeight: 600 }}>
+            + Neues Rezept
+          </button>
+        </div>
+      </header>
+
+      {!speicherOk && (
+        <div style={{ maxWidth: 1060, margin: "12px auto 0", padding: "12px 16px", background: "#FDECEA", color: C.paprika, border: `1.5px solid ${C.paprika}55`, borderRadius: 10, fontSize: 14, fontWeight: 600, lineHeight: 1.5 }}>
+          ⚠ Dein Browser speichert gerade keine Daten dauerhaft – Rezepte gehen beim Schließen verloren.
+          Häufige Ursachen: privater Modus / Inkognito, „Alle Cookies blockieren" (Safari: Einstellungen → Safari),
+          oder „Website-Daten beim Beenden löschen". Bitte in einem normalen Tab öffnen und die Blockierung für diese Seite aufheben.
+          Sichere deine Rezepte solange über „⬇ Sichern".
+        </div>
+      )}
+      {meldung && (
+        <div style={{ maxWidth: 1060, margin: "12px auto 0", padding: "10px 16px", background: C.senfBg, color: C.ink, border: `1px solid ${C.senf}55`, borderRadius: 10, fontSize: 14, fontWeight: 600 }}>
+          {meldung}
+        </div>
+      )}
+
+      <main style={{ maxWidth: 1060, margin: "0 auto", padding: "24px 20px 60px" }}>
+        {!geladen ? (
+          <p style={{ color: C.soft }}>Kochbuch wird geladen …</p>
+        ) : ansicht === "grid" ? (
+          <Uebersicht
+            rezepte={gefiltert} alleTags={alleTags}
+            suche={suche} setSuche={setSuche}
+            tagFilter={tagFilter} toggleTag={toggleTag}
+            katFilter={katFilter} setKatFilter={setKatFilter}
+            oeffnen={(r) => { setAktiv(r); setAnsicht("detail"); }}
+            leer={rezepte.length === 0}
+            neu={() => setAnsicht("form")}
+          />
+        ) : ansicht === "detail" && aktiv ? (
+          <Detail rezept={aktiv}
+            zurueck={() => setAnsicht("grid")}
+            bearbeiten={() => setAnsicht("form")}
+            loeschen={() => loeschen(aktiv.id)}
+            tagKlick={(t) => { setTagFilter([t]); setKatFilter("alle"); setAnsicht("grid"); }}
+          />
+        ) : ansicht === "form" ? (
+          <Formular vorlage={aktiv} speichern={upsert} abbrechen={() => setAnsicht(aktiv ? "detail" : "grid")} />
+        ) : ansicht === "import" ? (
+          <ImportSeite
+            uebernehmen={(r) => { setAktiv(r); setAnsicht("form"); }}
+            mehrereSpeichern={async (liste) => {
+              await speichern([...liste, ...rezepte]);
+              setAnsicht("grid");
+              setMeldung(`${liste.length} ${liste.length === 1 ? "Videorezept" : "Videorezepte"} hinzugefügt ✓`);
+              setTimeout(() => setMeldung(""), 4000);
+            }}
+            abbrechen={() => setAnsicht("grid")}
+          />
+        ) : null}
+      </main>
+    </div>
+  );
+}
+
+// ---------- Übersicht ----------
+function Uebersicht({ rezepte, alleTags, suche, setSuche, tagFilter, toggleTag, katFilter, setKatFilter, oeffnen, leer, neu }) {
+  const [limit, setLimit] = useState(48);
+  const topTags = Object.entries(alleTags).sort((a, b) => b[1] - a[1]).slice(0, 18);
+  return (
+    <div>
+      {/* Suche */}
+      <input
+        value={suche} onChange={(e) => setSuche(e.target.value)}
+        placeholder="Suchen … (Titel, Zutat oder #hashtag)"
+        style={{ width: "100%", padding: "12px 16px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.card, boxSizing: "border-box" }}
+      />
+
+      {/* Kategorien */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "14px 0 6px" }}>
+        <KatChip aktivId={katFilter} id="alle" name="Alle" farbe={C.ink} onClick={setKatFilter} />
+        {KATEGORIEN.map((k) => (
+          <KatChip key={k.id} aktivId={katFilter} id={k.id} name={k.name} farbe={k.farbe} onClick={setKatFilter} />
+        ))}
+      </div>
+
+      {/* Hashtags */}
+      {topTags.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0 4px" }}>
+          {topTags.map(([t, n]) => (
+            <button key={t} onClick={() => toggleTag(t)}
+              style={{
+                border: "none", borderRadius: 999, padding: "5px 12px", fontSize: 13,
+                background: tagFilter.includes(t) ? C.senf : C.senfBg,
+                color: tagFilter.includes(t) ? "#fff" : "#8A6A1E", fontWeight: 600,
+              }}>
+              #{t} <span style={{ opacity: 0.6, fontWeight: 400 }}>{n}</span>
+            </button>
+          ))}
+          {tagFilter.length > 0 && (
+            <button onClick={() => tagFilter.forEach(toggleTag)} style={{ border: "none", background: "transparent", color: C.paprika, fontSize: 13, fontWeight: 600 }}>
+              Filter zurücksetzen ✕
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Karten */}
+      {leer ? (
+        <div style={{ textAlign: "center", padding: "70px 20px", color: C.soft }}>
+          <div className="display" style={{ fontSize: 22, color: C.ink, marginBottom: 8 }}>Noch keine Rezepte</div>
+          <p style={{ margin: "0 0 18px" }}>Lege dein erstes Rezept an oder füge einen kopierten Instagram-Rezepttext ein.</p>
+          <button onClick={neu} style={{ border: "none", background: C.paprika, color: "#fff", borderRadius: 999, padding: "10px 20px", fontWeight: 600, fontSize: 14 }}>
+            + Erstes Rezept anlegen
+          </button>
+        </div>
+      ) : rezepte.length === 0 ? (
+        <p style={{ color: C.soft, marginTop: 24 }}>Keine Treffer für diese Suche/Filter.</p>
+      ) : (
+        <>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))", gap: 18, marginTop: 18 }}>
+          {rezepte.slice(0, limit).map((r) => (
+            <div key={r.id} className="karte" onClick={() => oeffnen(r)}
+              style={{ background: C.card, borderRadius: 16, overflow: "hidden", border: `1px solid ${C.line}`, cursor: "pointer" }}>
+              <div style={{ position: "relative", height: 150, background: `${katFarbe(r.kategorie)}22`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {r.bild ? (
+                  <img src={r.bild} alt={r.titel} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <span style={{ fontSize: 42 }}>{r.video ? "🎬" : "🍽️"}</span>
+                )}
+                {r.video && (
+                  <span style={{ position: "absolute", top: 8, right: 8, background: "rgba(31,51,38,.85)", color: "#fff", borderRadius: 999, padding: "3px 10px", fontSize: 11.5, fontWeight: 700, letterSpacing: ".03em" }}>
+                    ▶ Video
+                  </span>
+                )}
+              </div>
+              <div style={{ padding: "12px 14px 14px" }}>
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: katFarbe(r.kategorie) }}>
+                  {katName(r.kategorie)}
+                </span>
+                <div className="display" style={{ fontSize: 17, fontWeight: 700, margin: "3px 0 6px", lineHeight: 1.25 }}>{r.titel}</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {(r.hashtags || []).slice(0, 4).map((t) => (
+                    <span key={t} style={{ fontSize: 12, color: "#8A6A1E", background: C.senfBg, borderRadius: 999, padding: "2px 9px" }}>#{t}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {rezepte.length > limit && (
+          <div style={{ textAlign: "center", marginTop: 22 }}>
+            <button onClick={() => setLimit((l) => l + 48)}
+              style={{ border: `1.5px solid ${C.ink}`, background: "transparent", color: C.ink, borderRadius: 999, padding: "9px 22px", fontWeight: 600, fontSize: 14 }}>
+              Mehr anzeigen ({rezepte.length - limit} weitere)
+            </button>
+          </div>
+        )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function KatChip({ aktivId, id, name, farbe, onClick }) {
+  const an = aktivId === id;
+  return (
+    <button onClick={() => onClick(id)}
+      style={{
+        borderRadius: 999, padding: "6px 14px", fontSize: 13.5, fontWeight: 600,
+        border: `1.5px solid ${an ? farbe : C.line}`,
+        background: an ? farbe : C.card, color: an ? "#fff" : C.ink,
+      }}>
+      {name}
+    </button>
+  );
+}
+
+// ---------- Detailansicht ----------
+function Detail({ rezept: r, zurueck, bearbeiten, loeschen, tagKlick }) {
+  const [frage, setFrage] = useState(false);
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto" }}>
+      <button onClick={zurueck} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, padding: 0, marginBottom: 14 }}>← Zurück zur Übersicht</button>
+      <div style={{ background: C.card, borderRadius: 18, overflow: "hidden", border: `1px solid ${C.line}` }}>
+        {r.bild && <img src={r.bild} alt={r.titel} style={{ width: "100%", maxHeight: 340, objectFit: "cover", display: "block" }} />}
+        <div style={{ padding: "22px 26px 26px" }}>
+          <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: katFarbe(r.kategorie) }}>{katName(r.kategorie)}</span>
+          <h2 className="display" style={{ fontSize: 30, margin: "4px 0 6px" }}>{r.titel}</h2>
+          {r.portionen && <div style={{ fontSize: 14, color: C.soft, marginBottom: 4 }}>Portionen: {r.portionen}</div>}
+          {r.quelle && (
+            <div style={{ fontSize: 13, color: C.soft, marginBottom: 10 }}>
+              Quelle: <a href={r.quelle} target="_blank" rel="noreferrer" style={{ color: C.paprika }}>{r.quelle}</a>
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "6px 0 18px" }}>
+            {(r.hashtags || []).map((t) => (
+              <button key={t} onClick={() => tagKlick(t)}
+                style={{ border: "none", fontSize: 13, color: "#8A6A1E", background: C.senfBg, borderRadius: 999, padding: "3px 11px", fontWeight: 600 }}>
+                #{t}
+              </button>
+            ))}
+          </div>
+
+          {r.video && (
+            <a href={r.video} target="_blank" rel="noreferrer"
+              style={{
+                display: "flex", alignItems: "center", gap: 16, textDecoration: "none",
+                background: `linear-gradient(120deg, ${C.ink}, #3A5244)`, borderRadius: 14,
+                padding: 14, margin: "0 0 22px", color: "#fff",
+              }}>
+              <div style={{ position: "relative", width: 96, height: 68, borderRadius: 10, overflow: "hidden", flexShrink: 0, background: "rgba(255,255,255,.12)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {r.bild && <img src={r.bild} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: 0.75 }} />}
+                <div style={{ position: "relative", width: 34, height: 34, borderRadius: "50%", background: "rgba(255,255,255,.92)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <div style={{ width: 0, height: 0, borderTop: "8px solid transparent", borderBottom: "8px solid transparent", borderLeft: `13px solid ${C.paprika}`, marginLeft: 3 }} />
+                </div>
+              </div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15.5 }}>Videorezept ansehen</div>
+                <div style={{ fontSize: 13, opacity: 0.75, marginTop: 2 }}>Öffnet das Reel auf Instagram</div>
+              </div>
+            </a>
+          )}
+
+          {(r.zutaten || []).length > 0 && (
+            <>
+              <h3 className="display" style={{ fontSize: 19, margin: "0 0 8px" }}>Zutaten</h3>
+              <ul style={{ margin: "0 0 20px", paddingLeft: 20, lineHeight: 1.7, fontSize: 15 }}>
+                {r.zutaten.map((z, i) => <li key={i}>{z}</li>)}
+              </ul>
+            </>
+          )}
+
+          {(r.schritte || []).length > 0 && (
+            <>
+              <h3 className="display" style={{ fontSize: 19, margin: "0 0 8px" }}>Zubereitung</h3>
+              <ol style={{ margin: 0, paddingLeft: 22, lineHeight: 1.75, fontSize: 15 }}>
+                {r.schritte.map((s, i) => <li key={i} style={{ marginBottom: 8 }}>{s}</li>)}
+              </ol>
+            </>
+          )}
+
+          {r.notizen && (
+            <>
+              <h3 className="display" style={{ fontSize: 19, margin: "20px 0 8px" }}>Notizen</h3>
+              <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>{r.notizen}</p>
+            </>
+          )}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 26 }}>
+            <button onClick={bearbeiten} style={{ border: `1.5px solid ${C.ink}`, background: "transparent", borderRadius: 999, padding: "8px 18px", fontWeight: 600, fontSize: 14, color: C.ink }}>Bearbeiten</button>
+            {!frage ? (
+              <button onClick={() => setFrage(true)} style={{ border: "none", background: "transparent", color: C.paprika, fontSize: 14, fontWeight: 600 }}>Löschen</button>
+            ) : (
+              <span style={{ fontSize: 14 }}>
+                Wirklich löschen?{" "}
+                <button onClick={loeschen} style={{ border: "none", background: C.paprika, color: "#fff", borderRadius: 999, padding: "5px 14px", fontWeight: 600, fontSize: 13 }}>Ja, löschen</button>{" "}
+                <button onClick={() => setFrage(false)} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 13 }}>Abbrechen</button>
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Formular ----------
+function Formular({ vorlage, speichern, abbrechen }) {
+  const [titel, setTitel] = useState(vorlage?.titel || "");
+  const [kategorie, setKategorie] = useState(vorlage?.kategorie || "hauptgericht");
+  const [portionen, setPortionen] = useState(vorlage?.portionen || "");
+  const [zutaten, setZutaten] = useState((vorlage?.zutaten || []).join("\n"));
+  const [schritte, setSchritte] = useState((vorlage?.schritte || []).join("\n"));
+  const [tags, setTags] = useState((vorlage?.hashtags || []).map((t) => "#" + t).join(" "));
+  const [quelle, setQuelle] = useState(vorlage?.quelle || "");
+  const [video, setVideo] = useState(vorlage?.video || "");
+  const [notizen, setNotizen] = useState(vorlage?.notizen || "");
+  const [bild, setBild] = useState(vorlage?.bild || "");
+  const [fehler, setFehler] = useState("");
+  const fileRef = useRef(null);
+
+  const bildWaehlen = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try { setBild(await compressImage(f)); }
+    catch { setFehler("Bild konnte nicht gelesen werden."); }
+  };
+
+  const absenden = () => {
+    if (!titel.trim()) { setFehler("Bitte einen Titel eingeben."); return; }
+    speichern({
+      id: vorlage?.id || uid(),
+      titel: titel.trim(),
+      kategorie,
+      portionen: portionen.trim(),
+      zutaten: zutaten.split("\n").map((z) => z.trim()).filter(Boolean),
+      schritte: schritte.split("\n").map((s) => s.trim()).filter(Boolean),
+      hashtags: extractTags(tags),
+      quelle: quelle.trim(),
+      video: video.trim(),
+      notizen: notizen.trim(),
+      bild,
+      erstellt: vorlage?.erstellt || new Date().toISOString(),
+    });
+  };
+
+  const feld = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.card, boxSizing: "border-box", fontFamily: "inherit", color: C.ink };
+  const label = { display: "block", fontSize: 13, fontWeight: 700, margin: "16px 0 5px", letterSpacing: ".02em" };
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+      <h2 className="display" style={{ fontSize: 24, margin: "0 0 4px" }}>{vorlage?.id ? "Rezept bearbeiten" : "Neues Rezept"}</h2>
+      {fehler && <div style={{ color: C.paprika, fontSize: 14, marginTop: 6 }}>{fehler}</div>}
+
+      <label style={label}>Titel *</label>
+      <input style={feld} value={titel} onChange={(e) => setTitel(e.target.value)} placeholder="z. B. Cremige Zitronenpasta" />
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: 2, minWidth: 200 }}>
+          <label style={label}>Kategorie</label>
+          <select style={feld} value={kategorie} onChange={(e) => setKategorie(e.target.value)}>
+            {KATEGORIEN.map((k) => <option key={k.id} value={k.id}>{k.name}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1, minWidth: 120 }}>
+          <label style={label}>Portionen</label>
+          <input style={feld} value={portionen} onChange={(e) => setPortionen(e.target.value)} placeholder="4" />
+        </div>
+      </div>
+
+      <label style={label}>Bild</label>
+      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        {bild && <img src={bild} alt="Vorschau" style={{ width: 90, height: 66, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.line}` }} />}
+        <button onClick={() => fileRef.current?.click()} style={{ border: `1.5px solid ${C.ink}`, background: "transparent", borderRadius: 999, padding: "7px 16px", fontSize: 14, fontWeight: 600, color: C.ink }}>
+          {bild ? "Bild ändern" : "Bild hochladen"}
+        </button>
+        {bild && <button onClick={() => setBild("")} style={{ border: "none", background: "transparent", color: C.paprika, fontSize: 13, fontWeight: 600 }}>Entfernen</button>}
+        <input ref={fileRef} type="file" accept="image/*" onChange={bildWaehlen} style={{ display: "none" }} />
+      </div>
+
+      <label style={label}>Instagram-Video / Reel (Link)</label>
+      <input style={feld} value={video} onChange={(e) => setVideo(e.target.value)} placeholder="https://www.instagram.com/reel/…" />
+      <div style={{ fontSize: 12.5, color: C.soft, marginTop: 4 }}>
+        Bei Videorezepten kannst du Zutaten und Schritte einfach leer lassen – das Video ist dann das Rezept.
+      </div>
+
+      <label style={label}>Zutaten (eine pro Zeile, optional)</label>
+      <textarea style={{ ...feld, minHeight: 130 }} value={zutaten} onChange={(e) => setZutaten(e.target.value)} placeholder={"250 g Spaghetti\n1 Zitrone\n100 ml Sahne"} />
+
+      <label style={label}>Zubereitung (ein Schritt pro Zeile, optional)</label>
+      <textarea style={{ ...feld, minHeight: 150 }} value={schritte} onChange={(e) => setSchritte(e.target.value)} placeholder={"Nudeln kochen.\nSauce anrühren.\nAlles vermengen."} />
+
+      <label style={label}>Hashtags (für Suche & Filter)</label>
+      <input style={feld} value={tags} onChange={(e) => setTags(e.target.value)} placeholder="#pasta #schnell #vegetarisch" />
+      <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+        {extractTags(tags).map((t) => (
+          <span key={t} style={{ fontSize: 12, color: "#8A6A1E", background: C.senfBg, borderRadius: 999, padding: "2px 9px" }}>#{t}</span>
+        ))}
+      </div>
+
+      <label style={label}>Quelle (z. B. Instagram-Link)</label>
+      <input style={feld} value={quelle} onChange={(e) => setQuelle(e.target.value)} placeholder="https://www.instagram.com/p/…" />
+
+      <label style={label}>Notizen</label>
+      <textarea style={{ ...feld, minHeight: 70 }} value={notizen} onChange={(e) => setNotizen(e.target.value)} placeholder="Eigene Anpassungen, Tipps …" />
+
+      <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
+        <button onClick={absenden} style={{ border: "none", background: C.paprika, color: "#fff", borderRadius: 999, padding: "10px 22px", fontWeight: 600, fontSize: 15 }}>Rezept speichern</button>
+        <button onClick={abbrechen} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, fontWeight: 600 }}>Abbrechen</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Instagram-Import (Text einfügen -> KI strukturiert) ----------
+function ImportSeite({ uebernehmen, mehrereSpeichern, abbrechen }) {
+  const [modus, setModus] = useState("text"); // text | liste
+  const [text, setText] = useState("");
+  const [link, setLink] = useState("");
+  const [laeuft, setLaeuft] = useState(false);
+  const [fehler, setFehler] = useState("");
+
+  // --- Bulk-Modus ---
+  const [liste, setListe] = useState("");
+  const [listeKat, setListeKat] = useState("auto");
+  const [listeTags, setListeTags] = useState("");
+
+  // --- JSON-Modus ---
+  const [jsonText, setJsonText] = useState("");
+  const [jsonVorschau, setJsonVorschau] = useState(null);
+
+  const jsonPruefen = (t) => {
+    setJsonText(t);
+    try {
+      const roh = t.replace(/^\uFEFF/, "").trim();
+      if (!roh) { setJsonVorschau(null); setFehler(""); return; }
+      let arr;
+      try {
+        arr = JSON.parse(roh); // Original zuerst – Captions dürfen „typografische“ Zeichen enthalten
+      } catch (e1) {
+        // Fallback: nur falls jemand das JSON durch einen Editor mit Autokorrektur kopiert hat
+        arr = JSON.parse(roh.replace(/[\u201C\u201D\u201E]/g, '"'));
+      }
+      if (!Array.isArray(arr)) throw new Error("kein Array");
+      const rezepte = arr
+        .filter((r) => r && (r.titel || r.video || r.quelle))
+        .map((r, i) => ({
+          id: r.id || uid() + i,
+          titel: String(r.titel || `Videorezept ${i + 1}`),
+          kategorie: KATEGORIEN.some((k) => k.id === r.kategorie) ? r.kategorie : "hauptgericht",
+          portionen: String(r.portionen || ""),
+          zutaten: Array.isArray(r.zutaten) ? r.zutaten.map(String) : [],
+          schritte: Array.isArray(r.schritte) ? r.schritte.map(String) : [],
+          hashtags: Array.isArray(r.hashtags) ? r.hashtags.map((x) => String(x).replace(/^#/, "").toLowerCase()) : [],
+          quelle: String(r.quelle || ""),
+          video: String(r.video || ""),
+          notizen: String(r.notizen || ""),
+          bild: "",
+          erstellt: new Date().toISOString(),
+        }));
+      setJsonVorschau(rezepte.length ? rezepte : null);
+      setFehler(rezepte.length ? "" : "Keine gültigen Rezepte in der Datei gefunden.");
+    } catch (e) {
+      setJsonVorschau(null);
+      if (t.trim()) setFehler(
+        "Das JSON ist ungültig – wahrscheinlich wurde beim Kopieren etwas abgeschnitten (bei großen Dateien passiert das leicht). " +
+        "Nutze am besten den Button „JSON-Datei hochladen“ – das umgeht das Problem komplett. (" + (e.message || "Parse-Fehler") + ")"
+      );
+    }
+  };
+
+  const jsonDateiRef = useRef(null);
+  const jsonDateiLaden = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => jsonPruefen(String(ev.target.result || ""));
+    reader.onerror = () => setFehler("Die Datei konnte nicht gelesen werden.");
+    reader.readAsText(f);
+    e.target.value = "";
+  };
+
+  const listeParsen = () => {
+    const gemeinsam = extractTags(listeTags);
+    return liste
+      .split("\n")
+      .map((zeile) => zeile.trim())
+      .filter(Boolean)
+      .map((zeile, i) => {
+        const urlMatch = zeile.match(/https?:\/\/\S+/);
+        if (!urlMatch) return null;
+        const url = urlMatch[0];
+        const rest = zeile.replace(url, " ");
+        const eigene = extractTags(rest);
+        const titel = rest.replace(/#[\p{L}\p{N}_äöüß-]+/giu, "").replace(/[|,;–-]+/g, " ").replace(/\s+/g, " ").trim();
+        const kat = listeKat === "auto"
+          ? kategorieErkennen(titel + " " + [...gemeinsam, ...eigene].join(" "))
+          : listeKat;
+        return {
+          id: uid() + i,
+          titel: titel || `Videorezept ${i + 1}`,
+          kategorie: kat,
+          portionen: "",
+          zutaten: [], schritte: [],
+          hashtags: [...new Set([...gemeinsam, ...eigene])],
+          quelle: url,
+          video: url,
+          notizen: "", bild: "",
+          erstellt: new Date().toISOString(),
+        };
+      })
+      .filter(Boolean);
+  };
+
+  const vorschau = listeParsen();
+
+  const listeSpeichern = async () => {
+    if (vorschau.length === 0) { setFehler("Keine gültigen Links gefunden – bitte einen Link pro Zeile einfügen."); return; }
+    setFehler("");
+    await mehrereSpeichern(vorschau);
+  };
+
+  // Lokaler Rezept-Parser (ohne KI) fuer die gehostete Version
+  const captionParsen = (cap) => {
+    const zutaten = [], schritte = [];
+    let modus = null;
+    const istZutat = (l) =>
+      /^[-\u2022*\u25AA\u25E6\u2023]\s*\S/.test(l) ||
+      /^\d[\d/.,\u00BD\u00BC\u00BE\u2153\u2154\s]*\s*(g|kg|ml|l|tbsp|tsp|cups?|oz|lbs?|el|tl|cloves?|bunch|handful|dash|splash|shots?|can|jar|stick|pinch)\b/i.test(l) ||
+      /^\d+\s*[x\u00D7]\s*\S/.test(l) || /^[\u00BD\u00BC\u00BE\u2153\u2154]\s/.test(l);
+    const istSchritt = (l) => /^\s*(\d+[.)]|step\s*\d+)\s+\S/i.test(l);
+    const zHeader = /^(ingredients?|zutaten|you.?ll need|what you need|for the .{1,40})\s*[:\-]?\s*$/i;
+    const sHeader = /^(method|instructions?|directions?|zubereitung|steps?|how to|anleitung)\s*[:\-]?\s*$/i;
+    for (const raw of cap.split("\n")) {
+      const line = raw.trim();
+      if (!line) continue;
+      if (zHeader.test(line)) { modus = "z"; continue; }
+      if (sHeader.test(line)) { modus = "s"; continue; }
+      if (istSchritt(line)) { schritte.push(line.replace(/^\s*(\d+[.)]|step\s*\d+)\s*/i, "").trim()); modus = "s"; continue; }
+      if (istZutat(line)) { zutaten.push(line.replace(/^[-\u2022*\u25AA\u25E6\u2023]\s*/, "").trim()); continue; }
+      if (modus === "s" && line.length > 15 && line.length < 250 && !line.startsWith("#")) schritte.push(line);
+    }
+    let titel = "";
+    const ohne = cap.replace(/#\S+|@\S+|https?:\/\/\S+/g, "");
+    for (const l of ohne.split("\n")) {
+      const t = l.replace(/\s+/g, " ").trim().replace(/^[\s\-\u2013\u2014\u2022:.,!|~*]+|[\s\-\u2013\u2014\u2022:.,!|~*]+$/g, "");
+      if (t.length >= 4) { titel = t.length > 70 ? t.slice(0, 70).replace(/\s\S*$/, "") + "\u2026" : t; break; }
+    }
+    const pm = cap.match(/(?:serves|servings?|makes|f\u00FCr)\s*[:\-]?\s*(\d+)/i);
+    const junk = new Set(["fyp","foryou","viral","ad","reels","recipe","recipes","food","cooking","yummy","delicious","foodporn","instafood","foodie","tasty","explore"]);
+    const hashtags = extractTags(cap).filter((t) => !junk.has(t)).slice(0, 6);
+    return {
+      titel, portionen: pm ? pm[1] : "",
+      kategorie: kategorieErkennen(titel + " " + cap.slice(0, 400) + " " + hashtags.join(" ")),
+      zutaten: zutaten.slice(0, 40), schritte: schritte.slice(0, 30), hashtags,
+    };
+  };
+
+  const analysieren = () => {
+    if (!text.trim()) { setFehler("Bitte zuerst den Rezepttext einfuegen."); return; }
+    setFehler("");
+    const p = captionParsen(text);
+    uebernehmen({
+      ...p,
+      titel: p.titel || "Neues Rezept",
+      quelle: link.trim(),
+      video: /\/(reel|reels|tv)\//i.test(link) ? link.trim() : "",
+      notizen: "", bild: "",
+    });
+  };
+
+
+
+  const feld = { width: "100%", padding: "10px 14px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.card, boxSizing: "border-box", fontFamily: "inherit", color: C.ink };
+
+  return (
+    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+      <h2 className="display" style={{ fontSize: 24, margin: "0 0 12px" }}>Rezepte importieren</h2>
+
+      {/* Modus-Umschalter */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {[["text", "Rezepttext (Caption)"], ["liste", "Video-Liste (Links)"], ["json", "JSON (strukturiert)"]].map(([id, name]) => (
+          <button key={id} onClick={() => { setModus(id); setFehler(""); }}
+            style={{
+              borderRadius: 999, padding: "7px 16px", fontSize: 14, fontWeight: 600,
+              border: `1.5px solid ${modus === id ? C.ink : C.line}`,
+              background: modus === id ? C.ink : C.card, color: modus === id ? "#fff" : C.ink,
+            }}>
+            {name}
+          </button>
+        ))}
+      </div>
+
+      {modus === "json" ? (
+        <>
+          <p style={{ fontSize: 14.5, color: C.soft, lineHeight: 1.6, margin: "0 0 16px" }}>
+            Hier kannst du eine fertig strukturierte Rezeptliste im JSON-Format einfügen – z. B. eine, die
+            Claude aus deinem Instagram-Datenexport erstellt hat. Jedes Rezept kommt dann komplett mit Titel,
+            Kategorie, Zutaten, Zubereitung, Hashtags und Video-Link an.
+          </p>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 14 }}>
+            <button onClick={() => jsonDateiRef.current?.click()}
+              style={{ border: "none", background: C.ink, color: "#fff", borderRadius: 999, padding: "9px 18px", fontWeight: 600, fontSize: 14 }}>
+              📄 JSON-Datei hochladen
+            </button>
+            <span style={{ fontSize: 13, color: C.soft }}>empfohlen – sicher bei großen Dateien</span>
+            <input ref={jsonDateiRef} type="file" accept=".json,application/json,text/plain" onChange={jsonDateiLaden} style={{ display: "none" }} />
+          </div>
+
+          <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "0 0 5px" }}>… oder JSON-Inhalt einfügen</label>
+          <textarea style={{ ...feld, minHeight: 200, fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}
+            value={jsonText} onChange={(e) => jsonPruefen(e.target.value)}
+            placeholder='[{"titel": "…", "kategorie": "hauptgericht", "zutaten": ["…"], …}]' />
+
+          {jsonVorschau && (
+            <div style={{ marginTop: 16, background: C.card, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                Vorschau · {jsonVorschau.length} Rezepte · davon {jsonVorschau.filter((r) => r.zutaten.length > 0).length} mit Zutaten & Schritten
+              </div>
+              {jsonVorschau.slice(0, 8).map((v) => (
+                <div key={v.id} style={{ fontSize: 13.5, padding: "4px 0", borderTop: `1px solid ${C.line}`, display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: katFarbe(v.kategorie), textTransform: "uppercase" }}>{katName(v.kategorie)}</span>
+                  <span>{v.zutaten.length > 0 ? "📖" : "▶"} {v.titel}</span>
+                </div>
+              ))}
+              {jsonVorschau.length > 8 && <div style={{ fontSize: 12.5, color: C.soft, paddingTop: 6 }}>… und {jsonVorschau.length - 8} weitere</div>}
+            </div>
+          )}
+
+          {fehler && <div style={{ color: C.paprika, fontSize: 14, marginTop: 10 }}>{fehler}</div>}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 20, alignItems: "center" }}>
+            <button onClick={() => jsonVorschau && mehrereSpeichern(jsonVorschau)} disabled={!jsonVorschau}
+              style={{ border: "none", background: jsonVorschau ? C.paprika : C.line, color: "#fff", borderRadius: 999, padding: "10px 22px", fontWeight: 600, fontSize: 15 }}>
+              {jsonVorschau ? `${jsonVorschau.length} Rezepte importieren` : "Rezepte importieren"}
+            </button>
+            <button onClick={abbrechen} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, fontWeight: 600 }}>Abbrechen</button>
+          </div>
+        </>
+      ) : modus === "liste" ? (
+        <>
+          <p style={{ fontSize: 14.5, color: C.soft, lineHeight: 1.6, margin: "0 0 16px" }}>
+            Füge hier mehrere Reel-Links auf einmal ein – <b>ein Link pro Zeile</b>. Optional kannst du hinter
+            jeden Link einen Titel und eigene Hashtags schreiben. Instagram-Sammlungen lassen sich leider nicht
+            direkt exportieren: Kopiere die Links einzeln über Teilen → „Link kopieren".
+          </p>
+
+          <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "0 0 5px" }}>Links (einer pro Zeile)</label>
+          <textarea style={{ ...feld, minHeight: 180, fontFamily: "inherit" }} value={liste} onChange={(e) => setListe(e.target.value)}
+            placeholder={"https://www.instagram.com/reel/AAA  Cremige Gnocchi #pasta\nhttps://www.instagram.com/reel/BBB  Halloumi-Bowl #schnell\nhttps://www.instagram.com/reel/CCC"} />
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "14px 0 5px" }}>Kategorie</label>
+              <select style={feld} value={listeKat} onChange={(e) => setListeKat(e.target.value)}>
+                <option value="auto">🪄 Automatisch erkennen</option>
+                {KATEGORIEN.map((k) => <option key={k.id} value={k.id}>{k.name} (für alle)</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1.4, minWidth: 200 }}>
+              <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "14px 0 5px" }}>Hashtags für alle (optional)</label>
+              <input style={feld} value={listeTags} onChange={(e) => setListeTags(e.target.value)} placeholder="#videorezept #ausprobieren" />
+            </div>
+          </div>
+
+          {vorschau.length > 0 && (
+            <div style={{ marginTop: 16, background: C.card, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 16px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Vorschau · {vorschau.length} {vorschau.length === 1 ? "Video" : "Videos"}</div>
+              {vorschau.slice(0, 8).map((v) => (
+                <div key={v.id} style={{ fontSize: 13.5, padding: "4px 0", borderTop: `1px solid ${C.line}`, display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: katFarbe(v.kategorie), textTransform: "uppercase" }}>{katName(v.kategorie)}</span>
+                  <span>▶ {v.titel}</span>
+                  <span style={{ color: C.soft, fontSize: 12 }}>{v.hashtags.map((t) => "#" + t).join(" ")}</span>
+                </div>
+              ))}
+              {vorschau.length > 8 && <div style={{ fontSize: 12.5, color: C.soft, paddingTop: 6 }}>… und {vorschau.length - 8} weitere</div>}
+            </div>
+          )}
+
+          {fehler && <div style={{ color: C.paprika, fontSize: 14, marginTop: 10 }}>{fehler}</div>}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 20, alignItems: "center" }}>
+            <button onClick={listeSpeichern}
+              style={{ border: "none", background: C.paprika, color: "#fff", borderRadius: 999, padding: "10px 22px", fontWeight: 600, fontSize: 15 }}>
+              {vorschau.length > 0 ? `${vorschau.length} Videorezepte speichern` : "Videorezepte speichern"}
+            </button>
+            <button onClick={abbrechen} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, fontWeight: 600 }}>Abbrechen</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p style={{ fontSize: 14.5, color: C.soft, lineHeight: 1.6, margin: "0 0 16px" }}>
+            Instagram lässt sich nicht direkt auslesen (Login-Sperre). So geht's stattdessen: Öffne den Beitrag,
+            kopiere die Bildunterschrift mit dem Rezept und füge sie hier ein. Der Text wird dann automatisch in
+            Titel, Zutaten, Schritte, Kategorie und Hashtags zerlegt. Das Foto kannst du danach als Screenshot hochladen.
+          </p>
+
+          <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "0 0 5px" }}>Kopierter Rezepttext</label>
+          <textarea style={{ ...feld, minHeight: 220 }} value={text} onChange={(e) => setText(e.target.value)}
+            placeholder={"Hier die kopierte Instagram-Caption einfügen …"} />
+
+          <label style={{ display: "block", fontSize: 13, fontWeight: 700, margin: "14px 0 5px" }}>Link zum Beitrag (optional, wird als Quelle gespeichert)</label>
+          <input style={feld} value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://www.instagram.com/p/…" />
+
+          {fehler && <div style={{ color: C.paprika, fontSize: 14, marginTop: 10 }}>{fehler}</div>}
+
+          <div style={{ display: "flex", gap: 10, marginTop: 20, alignItems: "center" }}>
+            <button onClick={analysieren} disabled={laeuft}
+              style={{ border: "none", background: laeuft ? C.soft : C.paprika, color: "#fff", borderRadius: 999, padding: "10px 22px", fontWeight: 600, fontSize: 15 }}>
+              {laeuft ? "Wird analysiert …" : "Text analysieren"}
+            </button>
+            <button onClick={abbrechen} style={{ border: "none", background: "transparent", color: C.soft, fontSize: 14, fontWeight: 600 }}>Abbrechen</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Kochbuch />);
+</script>
+</body>
+</html>
